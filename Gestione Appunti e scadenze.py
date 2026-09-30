@@ -276,7 +276,7 @@ with st.sidebar:
     st.markdown("### 📁 I miei Programmi")
 
     programmi = {
-        "Gestione Appunti e scadenze": "https://gestione-appunti-e-scadenze-zzzyoh7edsutx6yiyaogqv.streamlit.app/",
+        ""Gestione TEST Registrazioni Segretario": "https://gestioneseg-test.streamlit.app/"",
         "Gestione Programmi": "https://gestione-programmi-7kb2cuwy6ntgwe7kufezrg.streamlit.app/",
     }
 
