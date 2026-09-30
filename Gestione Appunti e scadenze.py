@@ -1,14 +1,12 @@
 """
-app.py
-Gestione Appunti e Scadenze - Web App (Streamlit + Google Sheets)
+Gestione Appunti e scadenze - Web App (Streamlit + Google Sheets)
 
-Scheletro costruito sulla stessa architettura di "Gestione Registrazioni SEG":
-sidebar con logout, navigazione tramite card cliccabili (session_state.pagina),
-stesso stile CSS per card/tab/post-it.
-
-L'accesso usa il login reale con Google (st.login): dopo
-il login, l'email verificata da Google viene cercata nel foglio "Utenti" per
-sapere chi è la persona e quale ruolo ha (Amministratore / Editor / Utente).
+Architettura allineata:
+- Gestione della barra laterale nascosta prima del login tramite CSS
+- Autenticazione Google tramite pulsante "🔑 Accedi con Google"
+- Verifica permessi sul foglio Google "Utenti" (separato dal foglio dati)
+- Gestione ruoli e modalità sola lettura
+- Menu laterale coordinato con link di navigazione tra programmi
 """
 
 from datetime import datetime
@@ -23,15 +21,28 @@ from google.oauth2.service_account import Credentials
 # 1. CONFIGURAZIONE PAGINA (Deve essere la prima istruzione Streamlit)
 # ==============================================================================
 st.set_page_config(
-    page_title="Gestione Appunti e Scadenze",
-    page_icon="🗓️",
+    page_title="Gestione Appunti e scadenze",
+    page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────
-# COSTANTI E CONFIGURAZIONI DEL SISTEMA
-# ─────────────────────────────────────────────────────────────────
+# Inizializzazione sicura della pagina nello stato della sessione
+if "pagina" not in st.session_state:
+    st.session_state.pagina = "home"
+
+# ── Stile CSS per titoli e interfaccia ───────────────────────────────────────
+st.markdown("""
+<style>
+h1 { font-size: 1.5rem !important; }
+h2 { font-size: 1.25rem !important; }
+h3 { font-size: 1.1rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ==============================================================================
+# 2. COSTANTI E CONFIGURAZIONI DEL SISTEMA
+# ==============================================================================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
@@ -48,11 +59,12 @@ NOME_FOGLIO_COMUNICAZIONI = "Comunicazioni"
 NOME_FOGLIO_ANNUNCI = "Annunci"
 
 
-# ─────────────────────────────────────────────────────────────────
-# CONNESSIONE A GOOGLE SHEETS
-# ─────────────────────────────────────────────────────────────────
+# ==============================================================================
+# 3. FUNZIONI HELPER E CONNESSIONE GOOGLE SHEETS
+# ==============================================================================
 @st.cache_resource(show_spinner=False)
 def get_client() -> gspread.Client:
+    """Autentica il programma verso Google tramite l'account di servizio."""
     credenziali = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES
     )
@@ -61,6 +73,7 @@ def get_client() -> gspread.Client:
 
 @st.cache_resource(show_spinner=False)
 def apri_foglio_dati():
+    """Apre il foglio Google principale per i dati dei form."""
     try:
         client = get_client()
         wb = client.open_by_key(st.secrets["sheet_id"])
@@ -75,8 +88,32 @@ def apri_foglio_dati():
         return None, f"Errore durante il collegamento: {e}"
 
 
+@st.cache_resource(show_spinner=False)
+def apri_foglio_utenti():
+    """Apre il foglio Google dedicato alla verifica degli utenti autorizzati."""
+    try:
+        client = get_client()
+        id_utenti = st.secrets.get("user_sheet_id", st.secrets["sheet_id"])
+        wb = client.open_by_key(id_utenti)
+        return wb, None
+    except gspread.exceptions.APIError:
+        email_sa = st.secrets["gcp_service_account"]["client_email"]
+        return None, (
+            "Impossibile aprire il foglio utenti. Controlla che sia stato "
+            f"condiviso con:\n`{email_sa}`"
+        )
+    except Exception as e:
+        return None, f"Errore durante il collegamento al foglio utenti: {e}"
+
+
+def sola_lettura() -> bool:
+    """Ritorna True se l'utente corrente ha accesso in sola lettura (ruolo 'utente')."""
+    return st.session_state.get("ruolo") == "utente"
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def leggi_foglio_come_df(_workbook, nome_foglio: str, riga_intestazione: int = 1):
+    """Legge un foglio (tab) del workbook e lo ritorna come DataFrame."""
     try:
         ws = _workbook.worksheet(nome_foglio)
     except gspread.WorksheetNotFound:
@@ -114,6 +151,7 @@ def leggi_foglio_come_df(_workbook, nome_foglio: str, riga_intestazione: int = 1
 
 def salva_riga_foglio(_workbook, nome_foglio: str, riga_intestazione: int,
                         valori: dict, riga_da_aggiornare: int = None):
+    """Scrive o aggiorna una riga nel foglio."""
     try:
         ws = _workbook.worksheet(nome_foglio)
         intestazioni = ws.row_values(riga_intestazione)
@@ -131,6 +169,7 @@ def salva_riga_foglio(_workbook, nome_foglio: str, riga_intestazione: int,
 
 
 def elimina_riga_foglio(_workbook, nome_foglio: str, riga_da_eliminare: int):
+    """Elimina una riga da un foglio."""
     try:
         ws = _workbook.worksheet(nome_foglio)
         ws.delete_rows(riga_da_eliminare)
@@ -139,73 +178,133 @@ def elimina_riga_foglio(_workbook, nome_foglio: str, riga_da_eliminare: int):
         return False, f"Errore durante l'eliminazione: {e}"
 
 
-def leggi_utente_da_email(_workbook, email: str):
-    df, err = leggi_foglio_come_df(_workbook, NOME_FOGLIO_UTENTI, RIGA_INTESTAZIONE_UTENTI)
+def leggi_utente_da_email(email: str):
+    """Cerca l'email verificata da Google nel foglio 'Utenti' dedicato."""
+    wb_utenti, err_utenti = apri_foglio_utenti()
+    if err_utenti or not wb_utenti:
+        return None, None
+
+    df, err = leggi_foglio_come_df(wb_utenti, NOME_FOGLIO_UTENTI, RIGA_INTESTAZIONE_UTENTI)
     if err or df is None or df.empty:
         return None, None
-    if "Email" not in df.columns:
+
+    colonne_lower = {str(c).strip().lower(): c for c in df.columns}
+    
+    col_email = colonne_lower.get("indirizzo") or colonne_lower.get("email")
+    col_nome = colonne_lower.get("utente") or colonne_lower.get("cognome e nome")
+    col_ruolo = colonne_lower.get("ruolo")
+
+    if not col_email and len(df.columns) >= 3:
+        col_nome = df.columns[1]
+        col_email = df.columns[2]
+        if len(df.columns) >= 4:
+            col_ruolo = df.columns[3]
+
+    if not col_email:
         return None, None
 
     email_norm = (email or "").strip().lower()
-    corrispondenza = df[df["Email"].astype(str).str.strip().str.lower() == email_norm]
+    corrispondenza = df[df[col_email].astype(str).str.strip().str.lower() == email_norm]
+    
     if corrispondenza.empty:
         return None, None
 
     riga = corrispondenza.iloc[0]
-    nome = str(riga.get("Cognome e Nome", "")).strip()
-    ruolo_grezzo = str(riga.get("Ruolo", "")).strip().lower()
+    nome = str(riga.get(col_nome, "")).strip() if col_nome else ""
+    ruolo_grezzo = str(riga.get(col_ruolo, "")).strip().lower() if col_ruolo else "utente"
+    
     if ruolo_grezzo not in ("amministratore", "editor", "utente"):
         ruolo_grezzo = "utente"
+
     return (nome or email), ruolo_grezzo
 
 
 # ==============================================================================
-# 2. PANNELLO DI AUTENTICAZIONE (login reale con Google)
+# 4. PANNELLO DI AUTENTICAZIONE GOOGLE (Se non loggato, nasconde la sidebar)
 # ==============================================================================
 if not st.user.is_logged_in:
+    st.markdown("""
+        <style>
+            [data-testid="stSidebar"] {display: none !important;}
+            [data-testid="collapsedControl"] {display: none !important;}
+        </style>
+    """, unsafe_allow_html=True)
+
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.title("🔒 Accesso Riservato")
-        st.subheader("Gestione Appunti e Scadenze")
-        st.write("Accedi con il tuo account Google per entrare nell'applicazione.")
-        if st.button("🔐 Accedi con Google", type="primary", use_container_width=True):
+        st.subheader("Gestione Appunti e scadenze")
+        st.write("Accedi utilizzando il tuo account Google autorizzato.")
+        if st.button("🔑 Accedi con Google", use_container_width=True, type="primary"):
             st.login()
     st.stop()
 
-
 # ==============================================================================
-# 3. AREA RISERVATA
+# 5. VERIFICA UTENTE E GESTIONE SESSIONE & CONNESSIONE
 # ==============================================================================
-workbook, errore = apri_foglio_dati()
-collegato = workbook is not None
+email_autenticata = (st.user.email or "").strip().lower()
 
-if "ruolo" not in st.session_state or st.session_state.get("email_verificata") != st.user.email:
-    if not collegato:
-        st.error("⚠️ Impossibile verificare l'utente: il foglio dati non è raggiungibile.")
-        st.caption(errore or "")
+if st.session_state.get("email_logged") != email_autenticata:
+    wb_utenti, errore_utenti = apri_foglio_utenti()
+    if errore_utenti:
+        st.error(f"⚠️ Impossibile verificare l'utente: {errore_utenti}")
         if st.button("🚪 Esci", use_container_width=True):
             st.logout()
         st.stop()
 
-    nome_trovato, ruolo_trovato = leggi_utente_da_email(workbook, st.user.email)
+    nome_trovato, ruolo_trovato = leggi_utente_da_email(email_autenticata)
     if not nome_trovato:
-        st.error(f"⚠️ L'indirizzo **{st.user.email}** non è autorizzato ad accedere a questa "
-                 f"applicazione. Contatta l'amministratore per farti aggiungere al foglio «{NOME_FOGLIO_UTENTI}».")
-        if st.button("🚪 Esci", use_container_width=True):
+        st.error(f"⚠️ L'account **{email_autenticata}** non è autorizzato ad accedere a questa applicazione.")
+        st.info(f"Contatta l'amministratore per farti aggiungere al foglio «{NOME_FOGLIO_UTENTI}».")
+        if st.button("🚪 Esci e riprova con un altro account", use_container_width=True):
+            for chiave in ("email_logged", "nome_utente", "ruolo", "pagina"):
+                st.session_state.pop(chiave, None)
             st.logout()
         st.stop()
 
+    st.session_state.email_logged = email_autenticata
     st.session_state.nome_utente = nome_trovato
     st.session_state.ruolo = ruolo_trovato
-    st.session_state.email_verificata = st.user.email
 
+workbook, errore_conn = apri_foglio_dati()
+collegato = workbook is not None
+
+# ==============================================================================
+# 6. BARRA LATERALE (NAVIGAZIONE PROGRAMMI, UTENTE E LOGOUT)
+# ==============================================================================
 with st.sidebar:
+    st.markdown("### 📁 I miei Programmi")
+
+    programmi = {
+        "Gestione Appunti e scadenze": "https://gestione-appunti-e-scadenze-zzzyoh7edsutx6yiyaogqv.streamlit.app/",
+        "Gestione Programmi": "https://gestione-programmi-7kb2cuwy6ntgwe7kufezrg.streamlit.app/",
+    }
+
+    links_html = ""
+    for nome, url in programmi.items():
+        links_html += f'<div style="margin-bottom: 2px;"><a href="{url}" target="_blank" style="text-decoration: none; color: #31333F; font-size: 14px; font-weight: 500;">📈 {nome}</a></div>'
+
+    st.markdown(
+        f'<div style="padding-left: 12px; margin-bottom: 10px;">{links_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.divider()
+
     st.write("👤 Utente connesso:")
-    st.write(f"**{st.session_state.nome_utente}**")
-    st.caption(f"Ruolo: {st.session_state.ruolo.capitalize()}")
-    st.caption(f"📧 `{st.user.email}`")
+    st.write(f"**{st.session_state.get('nome_utente', 'Utente')}**")
+    st.write(f"📧 `{st.session_state.email_logged}`")
+    
+    ruolo_utente = str(st.session_state.get("ruolo", "Non specificato")).capitalize()
+    st.write(f"🏷️ **Ruolo:** `{ruolo_utente}`")
+
+    if sola_lettura():
+        st.caption("🔒 Modalità sola lettura: puoi consultare i dati ma non modificarli.")
+
+    st.divider()
+
     if st.button("🚪 Logout", type="secondary", use_container_width=True):
-        for chiave in ("nome_utente", "ruolo", "email_verificata"):
+        for chiave in ("nome_utente", "ruolo", "email_logged", "pagina"):
             st.session_state.pop(chiave, None)
         st.logout()
 
@@ -256,7 +355,7 @@ def mostra_griglia_card(lista_card):
                     st.caption(desc)
 
                     st.button(" ", key=f"nav_{pagina}", disabled=not collegato,
-                               on_click=vai_a, args=(pagina,), use_container_width=True)
+                              on_click=vai_a, args=(pagina,), use_container_width=True)
 
 
 def _inietta_css_home():
@@ -303,6 +402,30 @@ def _inietta_css_home():
         .bg-amber  { background: rgba(245, 158, 11, 0.15); border: 1px solid rgba(245, 158, 11, 0.4); }
         .bg-slate  { background: rgba(100, 116, 139, 0.15); border: 1px solid rgba(100, 116, 139, 0.4); }
 
+        .hud-badge {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            white-space: nowrap;
+            display: inline-block;
+        }
+        .hud-green {
+            background: rgba(16, 185, 129, 0.15);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        .hud-yellow {
+            background: rgba(245, 158, 11, 0.15);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+        .hud-red {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
         .stTabs [data-baseweb="tab-list"] {
             gap: 6px;
             border-bottom: 1px solid rgba(128,128,128,0.3);
@@ -336,10 +459,12 @@ def _inietta_css_home():
             box-shadow: 4px 7px 18px rgba(0,0,0,0.24);
             transform: translateY(-2px);
         }
+
         div[class*="st-key-card_"] .custom-card-header,
         div[class*="st-key-card_"] [data-testid="stCaptionContainer"] {
             pointer-events: none !important;
         }
+
         div[class*="st-key-card_"] div[data-testid="stElementContainer"]:has(div[data-testid="stButton"]) {
             position: absolute !important;
             inset: 0 !important;
@@ -349,12 +474,14 @@ def _inietta_css_home():
             padding: 0 !important;
             z-index: 5 !important;
         }
+
         div[class*="st-key-card_"] div[data-testid="stButton"] {
             width: 100% !important;
             height: 100% !important;
             margin: 0 !important;
             padding: 0 !important;
         }
+
         div[class*="st-key-card_"] div[data-testid="stButton"] button {
             width: 100% !important;
             height: 100% !important;
@@ -365,6 +492,7 @@ def _inietta_css_home():
             margin: 0 !important;
             padding: 0 !important;
         }
+
         div[class*="st-key-card_"] div[data-testid="stButton"] button:disabled {
             cursor: not-allowed !important;
         }
@@ -402,7 +530,7 @@ def mostra_home():
     st.markdown(
         f"""
         <div style="margin-bottom: 12px;">
-            <h3 style="font-size: 1.25rem; font-weight: 700; margin: 0; padding: 0;">🗓️ Gestione Appunti e Scadenze</h3>
+            <h3 style="font-size: 1.25rem; font-weight: 700; margin: 0; padding: 0;">📋 Gestione Appunti e scadenze</h3>
             <p style="font-size: 0.8rem; color: #6b7280; margin: 2px 0 0 0; padding: 0;">
                 Ultimo aggiornamento: {ora_ora}
             </p>
@@ -417,8 +545,8 @@ def mostra_home():
     <div class="postit-card">
         <div class="postit-titolo">📌 Benvenuto/a</div>
         <div class="postit-testo">
-            Da qui puoi gestire i tuoi appunti, le tue scadenze
-            e consultare le informazioni.
+            Da qui puoi gestire i tuoi appunti, le scadenze
+            e consultare le informazioni di congregazione.
         </div>
     </div>
     """
@@ -431,18 +559,18 @@ def mostra_home():
 
     with tabs[1]:
         st.subheader("📋 I miei impegni")
-        st.caption("🚧 Sezione in costruzione — verrà collegata a un foglio Google.")
+        st.caption("🚧 Sezione in costruzione.")
 
     with tabs[2]:
         st.subheader("📅 Questa settimana")
-        st.caption("🚧 Sezione in costruzione — verrà collegata a un foglio Google.")
+        st.caption("🚧 Sezione in costruzione.")
 
     with tabs[3]:
         mostra_griglia_card(CARD_INFORMAZIONI)
 
     with tabs[4]:
         st.subheader("🗓️ Programmi")
-        st.caption("🚧 Sezione in costruzione — verrà collegata a un foglio Google.")
+        st.caption("🚧 Sezione in costruzione.")
 
 
 def _pagina_segnaposto(titolo: str, emoji: str, nome_foglio_futuro: str):
@@ -454,7 +582,7 @@ def _pagina_segnaposto(titolo: str, emoji: str, nome_foglio_futuro: str):
         st.warning("⚠️ Nessun foglio dati collegato.")
         return
 
-    st.info(f"🚧 Sezione in costruzione. Leggerà i dati dal foglio Google «{nome_foglio_futuro}».")
+    st.info(f"🚧 Sezione in costruzione. Questa pagina leggerà i dati dal foglio Google «{nome_foglio_futuro}».")
 
 
 def mostra_info_adunanze():
@@ -490,22 +618,35 @@ def mostra_tabella_informazioni_ridotta():
     mostra_griglia_card(CARD_INFORMAZIONI)
 
 
-PAGINE_CONSENTITE_UTENTE = {"home", "info_adunanze", "info_ministero", "info_comunicazioni", "info_annunci"}
-if st.session_state.ruolo == "utente" and st.session_state.pagina not in PAGINE_CONSENTITE_UTENTE:
-    st.session_state.pagina = "home"
+PAGINE_CONSENTITE_UTENTE = {
+    "home",
+    "info_adunanze",
+    "info_ministero",
+    "info_comunicazioni",
+    "info_annunci",
+}
 
-if st.session_state.ruolo == "utente" and st.session_state.pagina == "home":
+ruolo_attuale = st.session_state.get("ruolo", "utente")
+pagina_attuale = st.session_state.get("pagina", "home")
+
+if "pagina" not in st.session_state:
+    st.session_state.pagina = pagina_attuale
+
+if ruolo_attuale == "utente" and pagina_attuale not in PAGINE_CONSENTITE_UTENTE:
+    st.session_state.pagina = "home"
+    pagina_attuale = "home"
+
+if ruolo_attuale == "utente" and pagina_attuale == "home":
     mostra_tabella_informazioni_ridotta()
     st.stop()
 
-
-if st.session_state.pagina == "info_adunanze":
+if pagina_attuale == "info_adunanze":
     mostra_info_adunanze()
-elif st.session_state.pagina == "info_ministero":
+elif pagina_attuale == "info_ministero":
     mostra_info_ministero()
-elif st.session_state.pagina == "info_comunicazioni":
+elif pagina_attuale == "info_comunicazioni":
     mostra_info_comunicazioni()
-elif st.session_state.pagina == "info_annunci":
+elif pagina_attuale == "info_annunci":
     mostra_info_annunci()
 else:
     mostra_home()
