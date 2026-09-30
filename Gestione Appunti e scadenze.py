@@ -162,7 +162,7 @@ def leggi_utente_da_email(_workbook, email: str):
 # ==============================================================================
 # 2. PANNELLO DI AUTENTICAZIONE (login reale con Google)
 # ==============================================================================
-if not st.experimental_user.is_logged_in:
+if not st.user.is_logged_in:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.title("🔒 Accesso Riservato")
@@ -179,7 +179,7 @@ if not st.experimental_user.is_logged_in:
 workbook, errore = apri_foglio_dati()
 collegato = workbook is not None
 
-if "ruolo" not in st.session_state or st.session_state.get("email_verificata") != st.experimental_user.email:
+if "ruolo" not in st.session_state or st.session_state.get("email_verificata") != st.user.email:
     if not collegato:
         st.error("⚠️ Impossibile verificare l'utente: il foglio dati non è raggiungibile.")
         st.caption(errore or "")
@@ -187,9 +187,9 @@ if "ruolo" not in st.session_state or st.session_state.get("email_verificata") !
             st.logout()
         st.stop()
 
-    nome_trovato, ruolo_trovato = leggi_utente_da_email(workbook, st.experimental_user.email)
+    nome_trovato, ruolo_trovato = leggi_utente_da_email(workbook, st.user.email)
     if not nome_trovato:
-        st.error(f"⚠️ L'indirizzo **{st.experimental_user.email}** non è autorizzato ad accedere a questa "
+        st.error(f"⚠️ L'indirizzo **{st.user.email}** non è autorizzato ad accedere a questa "
                  f"applicazione. Contatta l'amministratore per farti aggiungere al foglio «{NOME_FOGLIO_UTENTI}».")
         if st.button("🚪 Esci", use_container_width=True):
             st.logout()
@@ -197,13 +197,13 @@ if "ruolo" not in st.session_state or st.session_state.get("email_verificata") !
 
     st.session_state.nome_utente = nome_trovato
     st.session_state.ruolo = ruolo_trovato
-    st.session_state.email_verificata = st.experimental_user.email
+    st.session_state.email_verificata = st.user.email
 
 with st.sidebar:
     st.write("👤 Utente connesso:")
     st.write(f"**{st.session_state.nome_utente}**")
     st.caption(f"Ruolo: {st.session_state.ruolo.capitalize()}")
-    st.caption(f"📧 `{st.experimental_user.email}`")
+    st.caption(f"📧 `{st.user.email}`")
     if st.button("🚪 Logout", type="secondary", use_container_width=True):
         for chiave in ("nome_utente", "ruolo", "email_verificata"):
             st.session_state.pop(chiave, None)
